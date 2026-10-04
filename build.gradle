@@ -48,17 +48,23 @@ minecraft {
 }
 
 repositories {
-    maven { url = 'https://maven.aliyun.com/repository/public' }
+    mavenCentral()
     maven {
         name = "Curios"
         url = "https://maven.theillusivec4.top/"
     }
+    maven { url = 'https://maven.aliyun.com/repository/public' }
 }
 
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
 
     implementation fg.deobf("top.theillusivec4.curios:curios-forge:${curios_version}")
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+}
+
+tasks.named('test', Test).configure {
+    useJUnitPlatform()
 }
 
 tasks.named('processResources', ProcessResources).configure {

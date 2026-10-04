@@ -20,7 +20,6 @@ import top.theillusivec4.curios.api.SlotContext;
 import top.theillusivec4.curios.api.type.capability.ICurioItem;
 
 import javax.annotation.Nullable;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -121,6 +120,7 @@ public class RotationItem extends Item implements ICurioItem {
 
     @Override
     public void onEquip(SlotContext slotContext, ItemStack prevStack, ItemStack stack) {
+        if (prevStack.is(this)) return;
         LivingEntity entity = slotContext.entity();
         if (entity instanceof Player player && !player.level().isClientSide) {
             player.getCapability(PlayerDataProvider.PLAYER_DATA).ifPresent(data -> {
@@ -135,8 +135,10 @@ public class RotationItem extends Item implements ICurioItem {
 
     @Override
     public void onUnequip(SlotContext slotContext, ItemStack newStack, ItemStack stack) {
+        if (newStack.is(this)) return;
         LivingEntity entity = slotContext.entity();
         if (entity instanceof Player player && !player.level().isClientSide) {
+            com.jiuzhuan.event.AccessoryProtectionHandler.onAccessoryUnequipped(slotContext, stack);
             player.getCapability(PlayerDataProvider.PLAYER_DATA).ifPresent(data -> {
                 data.setActivated(rotationLevel, false);
                 data.syncToClient(player);
@@ -162,190 +164,161 @@ public class RotationItem extends Item implements ICurioItem {
     @Override
     public void appendHoverText(ItemStack stack, @Nullable Level level, List<Component> tooltip, TooltipFlag flag) {
         IPlayerData data = (level != null && level.isClientSide) ? getClientPlayerData() : null;
+        String title = Component.translatable("nine_turn_ring.rotation." + rotationLevel + ".title").getString();
+        if (rotationLevel >= 7 && rotationLevel <= 9) {
+            int[] dark = {0xAA0000, 0x00AA00, 0xFFAA00};
+            int[] light = {0xFF5555, 0x55FF55, 0xFFFF88};
+            float phase = (float) (0.5 + 0.5 * Math.sin(System.currentTimeMillis() / 1200.0 * Math.PI * 2));
+            int color = lerpColor(dark[rotationLevel - 7], light[rotationLevel - 7], phase);
+            tooltip.add(Component.literal(title).withStyle(s -> s.withColor(TextColor.fromRgb(color))));
+        } else if (rotationLevel == 10) {
+            MutableComponent rainbow = Component.literal("");
+            int offset = (int) ((System.currentTimeMillis() / 250) % RAINBOW_COLORS.length);
+            for (int i = 0; i < title.length(); i++) {
+                int color = RAINBOW_COLORS[(i + offset) % RAINBOW_COLORS.length];
+                rainbow.append(Component.literal(String.valueOf(title.charAt(i)))
+                        .withStyle(s -> s.withColor(TextColor.fromRgb(color))));
+            }
+            tooltip.add(rainbow);
+        } else {
+            tooltip.add(Component.literal(title));
+        }
 
         switch (rotationLevel) {
-            case 1:
-                tooltip.add(Component.translatable("nine_turn_ring.rotation.1.title"));
-                double rot1Per = ServerConfig.getRot1DamagePerKill() * 100;
-                double rot1Cap = ServerConfig.getRot1DamageCap();
-                String rot1Desc = "§7每击杀一个生物，最终伤害永久增加" + String.format("%.0f", rot1Per) + "%";
-                if (rot1Cap > 0) rot1Desc += "（上限" + String.format("%.0f", rot1Cap * 100) + "%）";
-                tooltip.add(Component.literal(rot1Desc));
+            case 1, 5 -> {
+                String capKey = rotationLevel == 1 ? ServerConfig.ROT1_CAP : ServerConfig.ROT5_CAP;
+                String targetKey = rotationLevel == 1 ? ServerConfig.ROT1_N90 : ServerConfig.ROT5_N90;
+                String prefix = "nine_turn_ring.rotation." + rotationLevel;
+                tooltip.add(Component.translatable(prefix + ".desc", number(1 + balance(data, capKey)),
+                        (int) balance(data, targetKey)));
+                tooltip.add(Component.translatable("nine_turn_ring.rotation.growth_rule"));
                 if (data != null) {
-                    double bonus = data.getPowerDamageBonus() * 100;
-                    tooltip.add(Component.literal(""));
-                    tooltip.add(Component.translatable("nine_turn_ring.rotation.1.bonus", String.format("%.1f", bonus)));
-                    tooltip.add(Component.translatable("nine_turn_ring.rotation.1.kills", data.getPowerKillCount()));
+                    double bonus = rotationLevel == 1 ? data.getPowerDamageBonus() : data.getHealthBonus();
+                    int kills = rotationLevel == 1 ? data.getPowerKillCount() : data.getHealthKillCount();
+                    tooltip.add(Component.translatable(prefix + ".bonus", number(bonus * 100)));
+                    tooltip.add(Component.translatable(prefix + ".kills", kills));
                 }
-                break;
-            case 2:
-                tooltip.add(Component.translatable("nine_turn_ring.rotation.2.title"));
-                tooltip.add(Component.translatable("nine_turn_ring.rotation.2.desc"));
-                break;
-            case 3:
-                tooltip.add(Component.translatable("nine_turn_ring.rotation.3.title"));
-                tooltip.add(Component.translatable("nine_turn_ring.rotation.3.desc"));
-                break;
-            case 4:
-                tooltip.add(Component.translatable("nine_turn_ring.rotation.4.title"));
-                tooltip.add(Component.translatable("nine_turn_ring.rotation.4.desc"));
-                break;
-            case 5:
-                tooltip.add(Component.translatable("nine_turn_ring.rotation.5.title"));
-                double rot5Per = ServerConfig.getRot5HealthPerKill() * 100;
-                double rot5Cap = ServerConfig.getRot5HealthCap();
-                String rot5Desc = "§7每击杀一个生物，最大生命值永久增加" + String.format("%.0f", rot5Per) + "%";
-                if (rot5Cap > 0) rot5Desc += "（上限" + String.format("%.0f", rot5Cap * 100) + "%）";
-                tooltip.add(Component.literal(rot5Desc));
+            }
+            case 2 -> tooltip.add(Component.translatable("nine_turn_ring.rotation.2.desc",
+                    (int) balance(data, ServerConfig.ROT2_FOOD_FLOOR), percent(data, ServerConfig.SPECIALIST_EFFECT_REDUCTION)));
+            case 3 -> tooltip.add(Component.translatable("nine_turn_ring.rotation.3.desc",
+                    percent(data, ServerConfig.SPECIALIST_EFFECT_REDUCTION)));
+            case 4 -> {
+                tooltip.add(Component.translatable("nine_turn_ring.rotation.4.desc",
+                        number(balance(data, ServerConfig.ROT4_COMBAT_HEAL)),
+                        seconds(data, ServerConfig.ROT4_REST_TICKS), number(balance(data, ServerConfig.ROT4_REST_HEAL))));
+                tooltip.add(Component.translatable("nine_turn_ring.rotation.4.effects",
+                        percent(data, ServerConfig.SPECIALIST_EFFECT_REDUCTION)));
+            }
+            case 6 -> {
+                tooltip.add(Component.translatable("nine_turn_ring.rotation.6.desc", percent(data, ServerConfig.ROT6_REDUCTION)));
+                tooltip.add(Component.translatable("nine_turn_ring.rotation.bypass_rule"));
+            }
+            case 7 -> {
+                tooltip.add(Component.translatable("nine_turn_ring.rotation.7.desc", percent(data, ServerConfig.ROT7_HEAL),
+                        seconds(data, ServerConfig.ROT7_INVINCIBLE_TICKS), seconds(data, ServerConfig.ROT7_COOLDOWN_TICKS)));
+                tooltip.add(Component.translatable("nine_turn_ring.rotation.7.priority"));
+                tooltip.add(Component.translatable("nine_turn_ring.rotation.bypass_rule"));
                 if (data != null) {
-                    double bonus = data.getHealthBonus() * 100;
-                    tooltip.add(Component.literal(""));
-                    tooltip.add(Component.translatable("nine_turn_ring.rotation.5.bonus", String.format("%.1f", bonus)));
-                    tooltip.add(Component.translatable("nine_turn_ring.rotation.5.kills", data.getHealthKillCount()));
+                    long now = data.getOnlineTicks();
+                    if (data.isInvincible(now)) tooltip.add(Component.translatable("nine_turn_ring.rotation.7.invincible",
+                            number((data.getInvincibleEnd() - now) / 20.0)));
+                    tooltip.add(data.isInCooldown(now)
+                            ? Component.translatable("nine_turn_ring.rotation.7.cooldown", number((data.getUndyingCooldownEnd() - now) / 20.0))
+                            : Component.translatable("nine_turn_ring.rotation.7.ready"));
                 }
-                break;
-            case 6:
-                tooltip.add(Component.translatable("nine_turn_ring.rotation.6.title"));
-                tooltip.add(Component.translatable("nine_turn_ring.rotation.6.desc"));
-                break;
-            case 7:
-                float t7 = (float) (0.5 + 0.5 * Math.sin(System.currentTimeMillis() / 1200.0 * Math.PI * 2));
-                int color7 = lerpColor(0xAA0000, 0xFF5555, t7);
-                String title7 = Component.translatable("nine_turn_ring.rotation.7.title").getString();
-                tooltip.add(Component.literal(title7).withStyle(s -> s.withColor(TextColor.fromRgb(color7))));
-                double rot7Heal = ServerConfig.getRot7HealRatio() * 100;
-                int rot7Inv = ServerConfig.getRot7InvincibleSeconds();
-                int rot7Cd = ServerConfig.getRot7CooldownSeconds();
-                String rot7Desc = "§7受到致命伤害时不会死亡，恢复" + String.format("%.0f", rot7Heal) + "%最大生命值并获得" + rot7Inv + "秒无敌，冷却" + rot7Cd + "秒";
-                tooltip.add(Component.literal(rot7Desc));
+            }
+            case 8 -> tooltip.add(Component.translatable("nine_turn_ring.rotation.8.desc"));
+            case 9 -> {
+                tooltip.add(Component.translatable("nine_turn_ring.rotation.9.desc",
+                        percent(data, ServerConfig.ROT9_TRIGGER_RATIO), percent(data, ServerConfig.ROT9_SHIELD_RATIO),
+                        seconds(data, ServerConfig.ROT9_SHIELD_TICKS), seconds(data, ServerConfig.ROT9_COOLDOWN_TICKS)));
+                tooltip.add(Component.translatable("nine_turn_ring.rotation.9.rule"));
+                tooltip.add(Component.translatable("nine_turn_ring.rotation.bypass_rule"));
                 if (data != null) {
-                    long now = System.currentTimeMillis();
-                    tooltip.add(Component.literal(""));
-                    if (data.isInvincible(now)) {
-                        double remain = (data.getInvincibleEnd() - now) / 1000.0;
-                        tooltip.add(Component.translatable("nine_turn_ring.rotation.7.invincible", String.format("%.1f", remain)));
+                    long now = data.getOnlineTicks();
+                    if (data.getEmergencyShield() > 0 && data.getShieldEndTick() > now) {
+                        tooltip.add(Component.translatable("nine_turn_ring.hud.shield", number(data.getEmergencyShield()),
+                                number((data.getShieldEndTick() - now) / 20.0)));
                     }
-                    if (data.isInCooldown(now)) {
-                        double remain = (data.getUndyingCooldownEnd() - now) / 1000.0;
-                        tooltip.add(Component.translatable("nine_turn_ring.rotation.7.cooldown", String.format("%.1f", remain)));
-                    } else {
-                        tooltip.add(Component.translatable("nine_turn_ring.rotation.7.ready"));
-                    }
+                    tooltip.add(data.getShieldCooldownEnd() > now
+                            ? Component.translatable("nine_turn_ring.hud.cooldown", number((data.getShieldCooldownEnd() - now) / 20.0))
+                            : Component.translatable("nine_turn_ring.hud.ready"));
                 }
-                break;
-            case 8:
-                float t8 = (float) (0.5 + 0.5 * Math.sin(System.currentTimeMillis() / 1200.0 * Math.PI * 2));
-                int color8 = lerpColor(0x00AA00, 0x55FF55, t8);
-                String title8 = Component.translatable("nine_turn_ring.rotation.8.title").getString();
-                tooltip.add(Component.literal(title8).withStyle(s -> s.withColor(TextColor.fromRgb(color8))));
-                tooltip.add(Component.translatable("nine_turn_ring.rotation.8.desc"));
-                break;
-            case 9:
-                float t9 = (float) (0.5 + 0.5 * Math.sin(System.currentTimeMillis() / 1200.0 * Math.PI * 2));
-                int color9 = lerpColor(0xFFAA00, 0xFFFF88, t9);
-                String title9 = Component.translatable("nine_turn_ring.rotation.9.title").getString();
-                tooltip.add(Component.literal(title9).withStyle(s -> s.withColor(TextColor.fromRgb(color9))));
-                double rot9Min = ServerConfig.getRot9MinHealth();
-                String rot9Desc = "§7生命值最低只会降到" + String.format("%.0f", rot9Min) + "点";
-                tooltip.add(Component.literal(rot9Desc));
-                break;
-            case 10:
-                String sub10 = Component.translatable("nine_turn_ring.rotation.10.title").getString();
-                MutableComponent rainbowSub = Component.literal("");
-                int off10 = (int) ((System.currentTimeMillis() / 250) % RAINBOW_COLORS.length);
-                for (int i = 0; i < sub10.length(); i++) {
-                    final int idx = i;
-                    rainbowSub.append(Component.literal(String.valueOf(sub10.charAt(idx)))
-                            .withStyle(s -> s.withColor(TextColor.fromRgb(RAINBOW_COLORS[(idx + off10) % RAINBOW_COLORS.length]))));
-                }
-                tooltip.add(rainbowSub);
-                double rot10Per = ServerConfig.getRot10ReductionPerStack() * 100;
-                int rot10Max = ServerConfig.getRot10MaxStacks();
-                int rot10Cd = ServerConfig.getRot10StackCooldownSeconds();
-                String rot10Desc1 = "§7受到某类伤害后，对该类型减伤叠加" + String.format("%.0f", rot10Per) + "%，最高" + String.format("%.0f", rot10Max * rot10Per) + "%免疫，同类伤害" + rot10Cd + "秒内只能叠一次；适应三种伤害类型后解锁飞行";
-                tooltip.add(Component.literal(rot10Desc1));
-                tooltip.add(Component.translatable("nine_turn_ring.rotation.10.desc2"));
-                if (data != null) {
-                    Map<String, Integer> levels = data.getAllAdaptationLevels();
-                    Map<String, Long> times = data.getAllAdaptationTimes();
-                    long now = System.currentTimeMillis();
-                    List<String> completed = new ArrayList<>();
-                    List<String> progressing = new ArrayList<>();
-                    for (Map.Entry<String, Integer> e : levels.entrySet()) {
-                        String type = com.jiuzhuan.util.NameUtil.getDamageTypeName(e.getKey());
-                        int lvl = e.getValue();
-                        double reduction = data.getAdaptationReduction(e.getKey()) * 100;
-                        if (lvl >= ServerConfig.getRot10MaxStacks()) {
-                            completed.add(type + Component.translatable("nine_turn_ring.rotation.10.reduction_100").getString());
-                        } else {
-                            Long lastTime = times.get(e.getKey());
-                            String cdStatus;
-                            long cdMs = (long) ServerConfig.getRot10StackCooldownSeconds() * 1000L;
-                            if (lastTime != null && now - lastTime < cdMs) {
-                                long remain = (cdMs - (now - lastTime)) / 1000;
-                                cdStatus = Component.translatable("nine_turn_ring.rotation.10.stack_cooldown", remain).getString();
-                            } else {
-                                cdStatus = Component.translatable("nine_turn_ring.rotation.10.stackable").getString();
-                            }
-                            progressing.add(type + "（" + lvl + "/" + ServerConfig.getRot10MaxStacks() + "，" + String.format("%.0f", reduction) + "%）- " + cdStatus);
-                        }
-                    }
-                    tooltip.add(Component.literal(""));
-                    if (!completed.isEmpty()) {
-                        tooltip.add(Component.translatable("nine_turn_ring.rotation.10.completed"));
-                        for (String s : completed) {
-                            tooltip.add(Component.literal("§a  " + s));
-                        }
-                    }
-                    if (!progressing.isEmpty()) {
-                        if (!completed.isEmpty()) tooltip.add(Component.literal(""));
-                        tooltip.add(Component.translatable("nine_turn_ring.rotation.10.adapting"));
-                        for (String s : progressing) {
-                            tooltip.add(Component.literal("§e  " + s));
-                        }
-                    }
-                    if (completed.isEmpty() && progressing.isEmpty()) {
-                        tooltip.add(Component.translatable("nine_turn_ring.rotation.10.no_damage"));
-                    }
-                    // 负面效果适应详情
-                    Map<String, Integer> effectLevels = data.getAllEffectAdaptationLevels();
-                    Map<String, Long> effectTimes = data.getAllEffectAdaptationTimes();
-                    List<String> effectCompleted = new ArrayList<>();
-                    List<String> effectProgressing = new ArrayList<>();
-                    for (Map.Entry<String, Integer> e : effectLevels.entrySet()) {
-                        String effectName = com.jiuzhuan.util.NameUtil.getEffectName(e.getKey());
-                        int lvl = Math.min(e.getValue(), 5);
-                        if (lvl <= 0) continue;
-                        if (lvl >= 5) {
-                            effectCompleted.add(effectName + Component.translatable("nine_turn_ring.rotation.10.full_immunity").getString());
-                        } else {
-                            Long lastTime = effectTimes.get(e.getKey());
-                            String cdStatus;
-                            if (lastTime != null && now - lastTime < 3000) {
-                                long remain = (3000 - (now - lastTime)) / 1000;
-                                cdStatus = Component.translatable("nine_turn_ring.rotation.10.stack_cooldown", remain).getString();
-                            } else {
-                                cdStatus = Component.translatable("nine_turn_ring.rotation.10.stackable").getString();
-                            }
-                            effectProgressing.add(effectName + "（" + lvl + "/5）- " + cdStatus);
-                        }
-                    }
-                    if (!effectCompleted.isEmpty() || !effectProgressing.isEmpty()) {
-                        tooltip.add(Component.literal(""));
-                        tooltip.add(Component.translatable("nine_turn_ring.rotation.10.effect_header"));
-                        for (String s : effectCompleted) {
-                            tooltip.add(Component.literal("§a  " + s));
-                        }
-                        for (String s : effectProgressing) {
-                            tooltip.add(Component.literal("§e  " + s));
-                        }
-                    }
-                }
-                break;
+            }
+            case 10 -> {
+                tooltip.add(Component.translatable("nine_turn_ring.rotation.10.desc1",
+                        percent(data, ServerConfig.ROT10_DAMAGE_CAP), (int) balance(data, ServerConfig.ROT10_HITS90),
+                        seconds(data, ServerConfig.ROT10_STACK_TICKS)));
+                tooltip.add(Component.translatable("nine_turn_ring.rotation.10.valid_hit",
+                        number(balance(data, ServerConfig.ROT10_MIN_DAMAGE)), percent(data, ServerConfig.ROT10_MIN_HEALTH_RATIO)));
+                tooltip.add(Component.translatable("nine_turn_ring.rotation.10.desc2",
+                        percent(data, ServerConfig.ROT10_EFFECT_CAP), number(balance(data, ServerConfig.ROT10_EFFECT_SECONDS90))));
+                tooltip.add(Component.translatable("nine_turn_ring.rotation.10.effects_rule"));
+                tooltip.add(Component.translatable("nine_turn_ring.rotation.10.flight",
+                        (int) balance(data, ServerConfig.ROT10_MATURITY_COUNT), seconds(data, ServerConfig.COMBAT_TICKS),
+                        seconds(data, ServerConfig.FLIGHT_SLOW_FALL_TICKS)));
+                tooltip.add(Component.translatable("nine_turn_ring.rotation.bypass_rule"));
+                if (data != null) appendAdaptationDetails(tooltip, data);
+            }
         }
         super.appendHoverText(stack, level, tooltip, flag);
     }
 
+    private static void appendAdaptationDetails(List<Component> tooltip, IPlayerData data) {
+        long now = data.getOnlineTicks();
+        int maturity = (int) data.getBalanceValue(ServerConfig.ROT10_MATURITY_COUNT);
+        long interval = (long) data.getBalanceValue(ServerConfig.ROT10_STACK_TICKS);
+        tooltip.add(Component.translatable("nine_turn_ring.rotation.10.adapting"));
+        if (data.getAllAdaptationLevels().isEmpty()) {
+            tooltip.add(Component.translatable("nine_turn_ring.rotation.10.no_damage"));
+        }
+        for (Map.Entry<String, Integer> entry : data.getAllAdaptationLevels().entrySet()) {
+            String name = com.jiuzhuan.util.NameUtil.getDamageTypeName(entry.getKey());
+            tooltip.add(Component.translatable("nine_turn_ring.rotation.10.damage_entry", name, entry.getValue(), maturity,
+                    number(data.getAdaptationReduction(entry.getKey()) * 100), percent(data, ServerConfig.ROT10_DAMAGE_CAP)));
+            Long lastHit = data.getAllAdaptationTimes().get(entry.getKey());
+            long remain = lastHit == null ? 0 : Math.max(0, interval - (now - lastHit));
+            MutableComponent status = Component.literal("  ");
+            if (entry.getValue() >= maturity) status.append(Component.translatable("nine_turn_ring.screen.mature")).append(" ");
+            status.append(Component.translatable(remain > 0 ? "nine_turn_ring.screen.cooldown" : "nine_turn_ring.screen.stackable",
+                    number(remain / 20.0)));
+            if (data.isDamageAdaptationDisabled(entry.getKey())) status.append(" ").append(Component.translatable("nine_turn_ring.screen.disabled"));
+            tooltip.add(status);
+        }
+        if (!data.getAllEffectExposureTicks().isEmpty()) {
+            tooltip.add(Component.translatable("nine_turn_ring.rotation.10.effect_header"));
+            for (Map.Entry<String, Integer> entry : data.getAllEffectExposureTicks().entrySet()) {
+                String name = com.jiuzhuan.util.NameUtil.getEffectName(entry.getKey());
+                MutableComponent line = Component.translatable("nine_turn_ring.rotation.10.effect_entry", name,
+                        number(entry.getValue() / 20.0), number(data.getEffectAdaptationReduction(entry.getKey()) * 100),
+                        percent(data, ServerConfig.ROT10_EFFECT_CAP));
+                if (data.isEffectAdaptationDisabled(entry.getKey())) line.append(" ").append(Component.translatable("nine_turn_ring.screen.disabled"));
+                tooltip.add(line);
+            }
+        }
+        if (data.hasFlightAdaptation()) {
+            tooltip.add(data.getCombatEndTick() > now
+                    ? Component.translatable("nine_turn_ring.hud.flight_combat", number((data.getCombatEndTick() - now) / 20.0))
+                    : Component.translatable("nine_turn_ring.hud.flight_ready"));
+        }
+    }
+
+    private static double balance(@Nullable IPlayerData data, String key) {
+        return data == null ? ServerConfig.getBalanceValue(key) : data.getBalanceValue(key);
+    }
+
+    private static String percent(@Nullable IPlayerData data, String key) {
+        return number(balance(data, key) * 100);
+    }
+
+    private static String seconds(@Nullable IPlayerData data, String key) {
+        return number(balance(data, key) / 20.0);
+    }
+
+    private static String number(double value) {
+        return String.format(java.util.Locale.ROOT, "%.2f", value).replaceAll("0+$", "").replaceAll("\\.$", "");
+    }
     @OnlyIn(Dist.CLIENT)
     private IPlayerData getClientPlayerData() {
         Player player = net.minecraft.client.Minecraft.getInstance().player;

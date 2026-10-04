@@ -1,10 +1,9 @@
 package com.jiuzhuan.client;
 
-import com.jiuzhuan.JiuZhuanMod;
 import com.jiuzhuan.capability.PlayerDataProvider;
+import com.jiuzhuan.config.ServerConfig;
 import com.jiuzhuan.item.ModItems;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.inventory.InventoryScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.player.Player;
@@ -76,19 +75,39 @@ public class RotationOverlay {
                     String status;
                     if (activated) {
                         if (i == 7) {
-                            long now = System.currentTimeMillis();
+                            long now = data.getOnlineTicks();
                             if (data.isInvincible(now)) {
-                                double invRemain = (data.getInvincibleEnd() - now) / 1000.0;
-                                double cdRemain = (data.getUndyingCooldownEnd() - now) / 1000.0;
+                                double invRemain = (data.getInvincibleEnd() - now) / 20.0;
+                                double cdRemain = (data.getUndyingCooldownEnd() - now) / 20.0;
                                 status = Component.translatable("nine_turn_ring.hud.invincible",
-                                        String.format("%.1f", invRemain),
-                                        String.format("%.1f", cdRemain)).getString();
+                                        number(invRemain), number(cdRemain)).getString();
                             } else if (data.isInCooldown(now)) {
-                                double remain = (data.getUndyingCooldownEnd() - now) / 1000.0;
+                                double remain = (data.getUndyingCooldownEnd() - now) / 20.0;
                                 status = Component.translatable("nine_turn_ring.hud.cooldown",
-                                        String.format("%.1f", remain)).getString();
+                                        number(remain)).getString();
                             } else {
                                 status = Component.translatable("nine_turn_ring.hud.ready").getString();
+                            }
+                        } else if (i == 9) {
+                            long now = data.getOnlineTicks();
+                            String cooldown = data.getShieldCooldownEnd() > now
+                                    ? Component.translatable("nine_turn_ring.hud.cooldown", number((data.getShieldCooldownEnd() - now) / 20.0)).getString()
+                                    : Component.translatable("nine_turn_ring.hud.ready").getString();
+                            status = data.getEmergencyShield() > 0 && data.getShieldEndTick() > now
+                                    ? Component.translatable("nine_turn_ring.hud.shield", number(data.getEmergencyShield()),
+                                            number((data.getShieldEndTick() - now) / 20.0)).getString() + " | " + cooldown
+                                    : cooldown;
+                        } else if (i == 1 || i == 5) {
+                            double bonus = i == 1 ? data.getPowerDamageBonus() : data.getHealthBonus();
+                            double cap = data.getBalanceValue(i == 1 ? ServerConfig.ROT1_CAP : ServerConfig.ROT5_CAP);
+                            status = Component.translatable("nine_turn_ring.hud.growth", number(1 + bonus), number(1 + cap)).getString();
+                        } else if (i == 10) {
+                            status = Component.translatable("nine_turn_ring.hud.maturity", data.getCompletedAdaptationCount()).getString();
+                            if (data.hasFlightAdaptation()) {
+                                status += " | " + (data.getCombatEndTick() > data.getOnlineTicks()
+                                        ? Component.translatable("nine_turn_ring.hud.flight_combat",
+                                                number((data.getCombatEndTick() - data.getOnlineTicks()) / 20.0)).getString()
+                                        : Component.translatable("nine_turn_ring.hud.flight_ready").getString());
                             }
                         } else {
                             status = Component.translatable("nine_turn_ring.hud.activated").getString();
@@ -102,4 +121,8 @@ public class RotationOverlay {
             }
         });
     };
+
+    private static String number(double value) {
+        return String.format(java.util.Locale.ROOT, "%.2f", value).replaceAll("0+$", "").replaceAll("\\.$", "");
+    }
 }

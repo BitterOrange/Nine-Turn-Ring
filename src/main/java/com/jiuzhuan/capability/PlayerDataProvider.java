@@ -64,6 +64,9 @@ public class PlayerDataProvider implements ICapabilityProvider, INBTSerializable
             CompoundTag finalSaved = saved;
             event.getEntity().getCapability(PLAYER_DATA).ifPresent(newData -> {
                 newData.loadNBT(finalSaved);
+                // The new player has freshly rebuilt abilities, even when returning through the End exit.
+                // Preserve the permanent unlock and online timers, not ownership of an old ability object.
+                newData.setFlightGrantedByMod(false);
             });
         }
     }

@@ -2,6 +2,7 @@ package com.jiuzhuan.event;
 
 import com.jiuzhuan.capability.IPlayerData;
 import com.jiuzhuan.capability.PlayerDataProvider;
+import com.jiuzhuan.config.ServerConfig;
 import com.jiuzhuan.item.ModItems;
 import com.jiuzhuan.util.AdvancementUtil;
 import net.minecraft.ChatFormatting;
@@ -59,10 +60,10 @@ public class NaturalGainHandler {
         });
     }
 
-    @SubscribeEvent(priority = net.minecraftforge.eventbus.api.EventPriority.HIGHEST, receiveCanceled = true)
+    @SubscribeEvent(priority = net.minecraftforge.eventbus.api.EventPriority.LOWEST)
     public void onLivingDeath(LivingDeathEvent event) {
         LivingEntity entity = event.getEntity();
-        if (entity.level().isClientSide) return;
+        if (entity.level().isClientSide || event.isCanceled()) return;
 
         if (entity instanceof Player player) {
             player.getCapability(PlayerDataProvider.PLAYER_DATA).ifPresent(data -> {
@@ -177,10 +178,10 @@ public class NaturalGainHandler {
         }
     }
 
-    @SubscribeEvent(receiveCanceled = true)
+    @SubscribeEvent(priority = net.minecraftforge.eventbus.api.EventPriority.LOWEST)
     public void onUseTotem(LivingUseTotemEvent event) {
         if (!(event.getEntity() instanceof Player player)) return;
-        if (player.level().isClientSide) return;
+        if (player.level().isClientSide || event.isCanceled()) return;
         player.getCapability(PlayerDataProvider.PLAYER_DATA).ifPresent(data -> {
             long now = System.currentTimeMillis();
             data.setTotemEffectActive(true);
@@ -227,7 +228,7 @@ public class NaturalGainHandler {
     @SubscribeEvent
     public void onPlayerRespawn(net.minecraftforge.event.entity.player.PlayerEvent.PlayerRespawnEvent event) {
         Player player = event.getEntity();
-        if (player.level().isClientSide) return;
+        if (player.level().isClientSide || event.isEndConquered()) return;
         player.getCapability(PlayerDataProvider.PLAYER_DATA).ifPresent(data -> {
             if (data.hasNatallyGotRot7()) return;
             long now = System.currentTimeMillis();
@@ -271,7 +272,7 @@ public class NaturalGainHandler {
                     data.syncToClient(player);
                 }
             }
-            // 登神之路：适应类型达到5层
+            // 登神之路：至少五种伤害达到配置的成熟次数。
             if (data.isActivated(10)) {
                 int adaptedTypes = countAdaptedTypes(data);
                 if (adaptedTypes >= 5) {
@@ -432,7 +433,7 @@ public class NaturalGainHandler {
     private int countAdaptedTypes(IPlayerData data) {
         int count = 0;
         for (int level : data.getAllAdaptationLevels().values()) {
-            if (level >= 10) count++;
+            if (level >= ServerConfig.getRot10MaturityCount()) count++;
         }
         return count;
     }
