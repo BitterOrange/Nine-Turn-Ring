@@ -38,7 +38,7 @@ public class SyncPlayerDataPacket {
         net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
         if (mc.player != null) {
             mc.player.getCapability(PlayerDataProvider.PLAYER_DATA).ifPresent(data -> {
-                data.loadNBT(msg.data);
+                data.loadClientNBT(msg.data);
             });
         }
     }

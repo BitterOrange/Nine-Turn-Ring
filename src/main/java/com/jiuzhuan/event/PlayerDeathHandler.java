@@ -2,12 +2,15 @@ package com.jiuzhuan.event;
 
 import com.jiuzhuan.capability.PlayerDataProvider;
 import com.jiuzhuan.config.ServerConfig;
+import com.jiuzhuan.util.CombatEquipment;
+import com.jiuzhuan.util.BalanceMath;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.GameRules;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.eventbus.api.EventPriority;
 
 /**
  * 死亡相关处理。
@@ -24,34 +27,42 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
  */
 public class PlayerDeathHandler {
 
-    @SubscribeEvent(priority = net.minecraftforge.eventbus.api.EventPriority.HIGHEST)
+    // Vanilla has already attempted to consume a totem before this event is fired.
+    @SubscribeEvent(priority = EventPriority.HIGHEST)
     public void onLivingDeath(LivingDeathEvent event) {
         if (!(event.getEntity() instanceof Player player)) return;
-        if (player.level().isClientSide) return;
+        if (player.level().isClientSide || event.isCanceled()) return;
+        if (CombatEquipment.bypassesRingDefenses(event.getSource())) return;
         player.getCapability(PlayerDataProvider.PLAYER_DATA).ifPresent(data -> {
-            // 7转涅槃：致死伤害时直接回血免死，不触发死亡（冷却由配置控制）
-            if (data.isActivated(7)) {
-                long now = System.currentTimeMillis();
-                if (!data.isInCooldown(now)) {
-                    event.setCanceled(true);
-                    float maxHealth = player.getMaxHealth();
-                    player.setHealth(maxHealth * (float) ServerConfig.getRot7HealRatio());
-                    data.setInvincibleEnd(now + (long) ServerConfig.getRot7InvincibleSeconds() * 1000L);
-                    data.setUndyingCooldownEnd(now + (long) ServerConfig.getRot7CooldownSeconds() * 1000L);
-                    data.syncToClient(player);
-                    player.sendSystemMessage(Component.translatable("nine_turn_ring.message.seven_triggered"));
-                    return;
-                }
-            }
+            if (!data.isRingEquipped() || !data.isActivated(7)
+                    || !CombatEquipment.hasEquippedRotation(player, 7)) return;
+            long now = data.getOnlineTicks();
+            if (data.isInCooldown(now)) return;
+            // Consume once, before restoring health. isAlive() cannot be required in a death callback.
+            data.setUndyingCooldownEnd(BalanceMath.saturatingAdd(now, ServerConfig.getRot7CooldownTicks()));
+            data.setInvincibleEnd(BalanceMath.saturatingAdd(now, ServerConfig.getRot7InvincibleTicks()));
+            data.setEmergencyShield(0);
+            data.setShieldEndTick(0);
+            event.setCanceled(true);
+            player.setHealth(player.getMaxHealth() * (float) ServerConfig.getRot7HealRatio());
+            ModEventHandlers.enterCombat(player, data);
+            data.syncToClient(player);
+            player.sendSystemMessage(Component.translatable("nine_turn_ring.message.seven_triggered"));
+        });
+    }
 
-            // 开启死亡不掉落：戒指与轮转全部由原版/Curios保留，不干预
-            if (player.level().getGameRules().getBoolean(GameRules.RULE_KEEPINVENTORY)) {
-                return;
+    @SubscribeEvent(priority = EventPriority.LOWEST)
+    public void onActualDeath(LivingDeathEvent event) {
+        if (!(event.getEntity() instanceof Player player)) return;
+        if (player.level().isClientSide || event.isCanceled()) return;
+        player.getCapability(PlayerDataProvider.PLAYER_DATA).ifPresent(data -> {
+            // Temporary protection never survives an actual death; cooldowns do.
+            data.setInvincibleEnd(0);
+            data.setEmergencyShield(0);
+            data.setShieldEndTick(0);
+            if (!player.level().getGameRules().getBoolean(GameRules.RULE_KEEPINVENTORY)) {
+                data.getAccessorySnapshot().keySet().removeIf(key -> key.startsWith("rotation:"));
             }
-
-            // 死亡掉落开启：九转戒由 ALWAYS_KEEP 留槽，轮转按默认规则掉落。
-            // 清除轮转饰品快照，避免饰品保护监控在死亡/复活后把已掉落的轮转恢复回轮转槽。
-            data.getAccessorySnapshot().keySet().removeIf(key -> key.startsWith("rotation:"));
         });
     }
 
@@ -63,7 +74,7 @@ public class PlayerDeathHandler {
     @SubscribeEvent
     public void onPlayerRespawn(PlayerEvent.PlayerRespawnEvent event) {
         Player player = event.getEntity();
-        if (player.level().isClientSide) return;
+        if (player.level().isClientSide || event.isEndConquered()) return;
         // 死亡不掉落：物品与激活状态全部保留，不作处理
         if (player.level().getGameRules().getBoolean(GameRules.RULE_KEEPINVENTORY)) {
             return;

@@ -1,33 +1,29 @@
 package com.jiuzhuan.event;
 
-import com.jiuzhuan.capability.IPlayerData;
 import com.jiuzhuan.capability.PlayerDataProvider;
 import com.jiuzhuan.item.ModItems;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.item.ItemTossEvent;
+import net.minecraftforge.event.entity.player.PlayerEvent;
+import net.minecraftforge.eventbus.api.Event;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.registries.RegistryObject;
 import top.theillusivec4.curios.api.CuriosApi;
+import top.theillusivec4.curios.api.SlotContext;
 import top.theillusivec4.curios.api.event.CurioUnequipEvent;
 import top.theillusivec4.curios.api.type.capability.ICuriosItemHandler;
+import top.theillusivec4.curios.common.inventory.container.CuriosContainer;
 
 import java.util.*;
 
 /**
  * 饰品防收取处理器
  *
- * 多层防御机制，防止九转戒和1-10转物品被BOSS（如诡厄巫法启示录的下界亚波伦）
- * 或其他机制强制摘取/收取：
- *
- * 第一层：RotationItem.canUnequip() 返回 false（非创造模式）
- * 第二层：RotationItem.onDroppedByPlayer() 返回 false，禁止丢弃
- * 第三层：ItemTossEvent 监听，阻止戒指/轮转物品被扔出
- * 第四层（本类核心）：Tick 级快照监控，每5tick扫描Curios栏，
- *   若发现已装备的戒指/轮转物品被强制移除（含被彻底销毁），立即从快照恢复到原槽位
- * 第五层：戒指被移到背包时的自动装备，已移至 NineTurnRingItem.inventoryTick
- *   （每tick检测、不依赖装备状态标记、不会与快照恢复重复）
+ * 允许通过 Curios 界面手动卸下，拒绝界面外的摘取权限查询并禁止丢弃。
+ * 快照每 5 tick 检查绕过权限查询的物品栏改动；实际手动卸下时移除对应快照。
+ * Curios 不提供卸装原因，防强制摘取只能尽力保护，不能覆盖其他模组的任意直接写入。
  */
 public class AccessoryProtectionHandler {
 
@@ -49,9 +45,12 @@ public class AccessoryProtectionHandler {
 
     // 懒加载：首次调用时才构建实际Item集合（此时注册已完成）
     private static volatile Set<net.minecraft.world.item.Item> protectedItemsCache = null;
-    // 记录玩家最近一次手动取下饰品的时间戳，冷却期内不自动从背包移回（区分手动取下与BOSS强制收取）
-    private static final Map<UUID, Long> manualUnequipTime = new HashMap<>();
-    private static final long MANUAL_UNEQUIP_COOLDOWN_MS = 15000; // 15秒冷却
+    // Permission queries may be simulated. Keep a short-lived candidate, never mutate snapshots
+    // until onUnequip confirms the stack actually left. This also survives immediately closing GUI.
+    private static final Map<UUID, Map<String, UnequipCheck>> manualUnequipChecks = new HashMap<>();
+    private record UnequipCheck(ItemStack stack, int tick) {
+        boolean isRecent(int now) { return now - tick >= 0 && now - tick <= 2; }
+    }
 
     private static Set<net.minecraft.world.item.Item> getProtectedItems() {
         Set<net.minecraft.world.item.Item> cache = protectedItemsCache;
@@ -90,9 +89,8 @@ public class AccessoryProtectionHandler {
     }
 
     /**
-     * 玩家主动通过Curios界面取下受保护物品时，删除该槽位的快照并设置手动取下冷却。
-     * BOSS强制摘取通常直接操作物品栏，不触发此事件，快照保留并正常恢复。
-     * 冷却期内第三步（背包扫描移回）不生效，让玩家可以自由取下轮转物品。
+     * 这是权限查询，不是卸装通知，也可能由右键装备或模拟提取触发。
+     * 该事件只有 HasResult，不能 setCanceled；这里绝不删除饰品快照。
      */
     @SubscribeEvent
     public void onCurioUnequip(CurioUnequipEvent event) {
@@ -102,30 +100,39 @@ public class AccessoryProtectionHandler {
         if (!isProtectedItem(stack)) return;
         // 死亡导致的卸下（轮转物品死亡掉落）一律放行，不取消、不删快照
         if (player.isDeadOrDying()) return;
-        // 判断是否为玩家主动通过容器GUI卸下（打开了非背包容器）
-        boolean isManual = player.containerMenu != player.inventoryMenu;
+        boolean isManual = player.containerMenu instanceof CuriosContainer;
         if (!isManual) {
-            // 被强制卸下（被打/其他模组）：直接取消事件，物品不会离开饰品栏
-            event.setCanceled(true);
+            event.setResult(Event.Result.DENY);
             return;
         }
-        // 玩家主动卸下：删除快照，设置冷却
         String slotKey = event.getSlotContext().identifier() + ":" + event.getSlotContext().index();
-        player.getCapability(PlayerDataProvider.PLAYER_DATA).ifPresent(data -> {
-            data.getAccessorySnapshot().remove(slotKey);
-        });
-        manualUnequipTime.put(player.getUUID(), System.currentTimeMillis());
+        manualUnequipChecks.computeIfAbsent(player.getUUID(), id -> new HashMap<>())
+                .put(slotKey, new UnequipCheck(stack.copy(), player.tickCount));
     }
 
     /**
-     * 清除玩家的手动取下冷却（戒指被卸下时调用，确保重新装备后轮转物品能正常自动装备）
+     * 仅在实际卸下轮转物品时提交此前的界面权限查询。
      */
-    public static void clearManualUnequipCooldown(UUID playerId) {
-        manualUnequipTime.remove(playerId);
+    public static void onAccessoryUnequipped(SlotContext context, ItemStack stack) {
+        if (!(context.entity() instanceof Player player) || player.level().isClientSide) return;
+        Map<String, UnequipCheck> checks = manualUnequipChecks.get(player.getUUID());
+        if (checks == null) return;
+        String key = context.identifier() + ":" + context.index();
+        UnequipCheck check = checks.remove(key);
+        if (checks.isEmpty()) manualUnequipChecks.remove(player.getUUID());
+        if (check != null && check.isRecent(player.tickCount) && ItemStack.isSameItemSameTags(check.stack(), stack)) {
+            player.getCapability(PlayerDataProvider.PLAYER_DATA)
+                    .ifPresent(data -> data.getAccessorySnapshot().remove(key));
+        }
+    }
+
+    @SubscribeEvent
+    public void onPlayerLogout(PlayerEvent.PlayerLoggedOutEvent event) {
+        manualUnequipChecks.remove(event.getEntity().getUUID());
     }
 
     /**
-     * 第四层+第五层+第六层防御：Tick级快照监控、槽位保护与戒指自动恢复
+     * Tick级快照监控和槽位保护，不从背包自动装备。
      * 每5tick扫描一次，确保所有受保护物品始终在Curios槽位中，且槽位数量不被篡改
      * LOWEST优先级：确保在其他模组（如Boss禁饰品）之后执行，强制恢复被篡改的状态
      */
@@ -134,6 +141,11 @@ public class AccessoryProtectionHandler {
         if (event.phase != TickEvent.Phase.END) return;
         Player player = event.player;
         if (player.level().isClientSide) return;
+        Map<String, UnequipCheck> checks = manualUnequipChecks.get(player.getUUID());
+        if (checks != null) {
+            checks.values().removeIf(check -> !check.isRecent(player.tickCount));
+            if (checks.isEmpty()) manualUnequipChecks.remove(player.getUUID());
+        }
         // 玩家死亡流程中不干预饰品：保证轮转按 Curios 规则正常掉落（九转戒由 ALWAYS_KEEP 自行保留，无需恢复）
         if (player.isDeadOrDying()) return;
         if (player.tickCount % 5 != 0) return; // 每5tick检查一次（0.25秒）
@@ -162,10 +174,6 @@ public class AccessoryProtectionHandler {
                     }
                 }
 
-                // ===== 戒指自动装备已统一由 NineTurnRingItem.inventoryTick 处理 =====
-                // （每tick检测背包，不依赖 isRingEquipped，覆盖首次获得/被强制移到背包；
-                //   戒指被彻底销毁、背包中找不到时，仍由下方快照恢复兜底）
-
                 // ===== 第一步：扫描当前Curios栏中所有受保护物品，更新快照 =====
                 Map<String, ItemStack> currentEquipped = new HashMap<>();
                 for (var entry : inv.getCurios().entrySet()) {
@@ -191,12 +199,12 @@ public class AccessoryProtectionHandler {
                     if (currentEquipped.containsKey(slotKey)) continue; // 还在原位，跳过
 
                     // 该槽位的受保护物品不见了，需要恢复
-                    String[] parts = slotKey.split(":");
-                    if (parts.length != 2) continue;
-                    String identifier = parts[0];
+                    int separator = slotKey.lastIndexOf(':');
+                    if (separator < 0) continue;
+                    String identifier = slotKey.substring(0, separator);
                     int slotIdx;
                     try {
-                        slotIdx = Integer.parseInt(parts[1]);
+                        slotIdx = Integer.parseInt(slotKey.substring(separator + 1));
                     } catch (NumberFormatException e) {
                         continue;
                     }
@@ -207,7 +215,7 @@ public class AccessoryProtectionHandler {
 
                     // 检查目标槽位是否存在且为空
                     var handler = inv.getCurios().get(identifier);
-                    if (handler == null || slotIdx >= handler.getSlots()) continue;
+                    if (handler == null || slotIdx < 0 || slotIdx >= handler.getSlots()) continue;
 
                     ItemStack currentInSlot = handler.getStacks().getStackInSlot(slotIdx);
                     if (currentInSlot.isEmpty()) {
@@ -230,10 +238,6 @@ public class AccessoryProtectionHandler {
                         restored = true;
                     }
                 }
-
-                // ===== 第三步已移除：不再从背包自动装备轮转物品 =====
-                // 被强制卸下（被打/其他模组）时已在 CurioUnequipEvent 中直接取消，物品不会离开饰品栏。
-                // 玩家主动卸下的物品留在背包，需手动装备回去。九转戒的自动装备由第五层处理。
 
                 if (restored) {
                     data.syncToClient(player);

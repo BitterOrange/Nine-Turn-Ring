@@ -17,12 +17,21 @@ public interface IPlayerData {
     // 1转：击杀数（力量成长）
     int getPowerKillCount();
     void addPowerKill(int count);
-    double getPowerDamageBonus(); // 5% per kill
+    double getPowerDamageBonus();
 
     // 5转：击杀数（血量成长）
     int getHealthKillCount();
     void addHealthKill(int count);
-    double getHealthBonus(); // 5% per kill
+    double getHealthBonus();
+
+    // Online gameplay time: persisted, never advances while logged out.
+    long getOnlineTicks();
+    void tickOnlineTime();
+    long getCombatEndTick();
+    void setCombatEndTick(long tick);
+    long getLastCombatTick();
+    void markCombat();
+    double getBalanceValue(String key);
 
     // 7转：不死
     long getUndyingCooldownEnd();
@@ -32,41 +41,38 @@ public interface IPlayerData {
     boolean isInCooldown(long now);
     boolean isInvincible(long now);
 
+    // Nine: finite emergency shield, independent of vanilla absorption hearts.
+    float getEmergencyShield();
+    void setEmergencyShield(float amount);
+    long getShieldEndTick();
+    void setShieldEndTick(long tick);
+    long getShieldCooldownEnd();
+    void setShieldCooldownEnd(long tick);
+
     // 10转：适应
     int getAdaptationLevel(String damageType);
     void addAdaptation(String damageType, long now);
     double getAdaptationReduction(String damageType);
     Map<String, Integer> getAllAdaptationLevels();
     Map<String, Long> getAllAdaptationTimes();
-    // 已完成（满级10层）的适应类型数量
+    // Damage level is a permanent qualifying-hit count; times are online ticks.
+    // A mature type reaches the configured finite milestone, never immunity.
     int getCompletedAdaptationCount();
-    // 某伤害类型是否已满级适应（10层）
+    // Whether the damage type has reached the maturity milestone.
     boolean hasFullAdaptation(String damageType);
     // 是否满足飞行适应条件（完成3种伤害类型适应）
     boolean hasFlightAdaptation();
+    void setFlightUnlocked(boolean value);
     // 伤害类型适应禁用列表（右键关闭后不再继续适应）
     boolean isDamageAdaptationDisabled(String damageType);
     void setDamageAdaptationDisabled(String damageType, boolean disabled);
     java.util.Set<String> getDisabledDamageTypes();
     // ===== 十转：负面效果适应 =====
-    // 某负面效果的适应层数（0-10）
-    int getEffectAdaptationLevel(String effectId);
-    // 尝试叠加一层负面效果适应（受3秒CD限制）
-    void addEffectAdaptation(String effectId, long now);
-    // 某负面效果的适应减益比例（0.0-1.0，每层0.1）
+    // Permanent actual exposure, in gameplay ticks. Reduces finite duration only.
     double getEffectAdaptationReduction(String effectId);
-    // 获取所有负面效果适应层数
-    Map<String, Integer> getAllEffectAdaptationLevels();
-    // 获取所有负面效果上次叠加时间戳
-    Map<String, Long> getAllEffectAdaptationTimes();
-    // 某负面效果是否已满级适应（10层，完全免疫）
-    boolean hasFullEffectAdaptation(String effectId);
-    // 某负面效果当前持续暴露的tick数
+    Map<String, Integer> getAllEffectExposureTicks();
     int getEffectExposureTicks(String effectId);
-    // 增加某负面效果的持续暴露tick数
     void addEffectExposureTicks(String effectId, int ticks);
-    // 重置某负面效果的持续暴露计数（叠加一层后调用）
-    void resetEffectExposureTicks(String effectId);
     // 负面效果适应禁用列表（右键关闭后不再继续适应）
     boolean isEffectAdaptationDisabled(String effectId);
     void setEffectAdaptationDisabled(String effectId, boolean disabled);
@@ -177,4 +183,5 @@ public interface IPlayerData {
     // NBT
     CompoundTag saveNBT();
     void loadNBT(CompoundTag tag);
+    void loadClientNBT(CompoundTag tag);
 }

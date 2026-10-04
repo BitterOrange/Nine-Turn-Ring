@@ -61,8 +61,6 @@ public class ThirteenRingItem extends Item implements ICurioItem {
     public void onEquip(SlotContext slotContext, ItemStack prevStack, ItemStack stack) {
         LivingEntity entity = slotContext.entity();
         if (entity instanceof Player player && !player.level().isClientSide) {
-            // 清除手动取下冷却，确保轮转物品能正常自动装备
-            com.jiuzhuan.event.AccessoryProtectionHandler.clearManualUnequipCooldown(player.getUUID());
             player.getCapability(PlayerDataProvider.PLAYER_DATA).ifPresent(data -> {
                 data.setRingEquipped(true);
                 data.syncToClient(player);
@@ -80,8 +78,6 @@ public class ThirteenRingItem extends Item implements ICurioItem {
     public void onUnequip(SlotContext slotContext, ItemStack newStack, ItemStack stack) {
         LivingEntity entity = slotContext.entity();
         if (entity instanceof Player player && !player.level().isClientSide) {
-            // 清除饰品防护的手动取下冷却，确保重新装备戒指后轮转物品能正常自动装备
-            com.jiuzhuan.event.AccessoryProtectionHandler.clearManualUnequipCooldown(player.getUUID());
             // 先把轮转槽里的物品弹回背包
             Optional<ICuriosItemHandler> curiosOpt = CuriosApi.getCuriosInventory(player).resolve();
             if (curiosOpt.isPresent()) {

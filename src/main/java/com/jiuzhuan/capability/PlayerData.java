@@ -3,6 +3,7 @@ package com.jiuzhuan.capability;
 import com.jiuzhuan.config.ServerConfig;
 import com.jiuzhuan.network.NetworkHandler;
 import com.jiuzhuan.network.SyncPlayerDataPacket;
+import com.jiuzhuan.util.BalanceMath;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.player.Player;
@@ -14,6 +15,7 @@ import java.util.Map;
 import java.util.Set;
 
 public class PlayerData implements IPlayerData {
+    public static final int DATA_VERSION = 2;
     private boolean ringEquipped = false;
     private final boolean[] activated = new boolean[11]; // index 1-10
 
@@ -22,25 +24,25 @@ public class PlayerData implements IPlayerData {
 
     private long undyingCooldownEnd = 0;
     private long invincibleEnd = 0;
+    private long onlineTicks;
+    private long combatEndTick;
+    private long lastCombatTick = -ServerConfig.getRot4RestTicks();
+    private float emergencyShield;
+    private long shieldEndTick;
+    private long shieldCooldownEnd;
+    private boolean flightUnlocked;
+    // This map is loaded only by the client packet, never saved or shared globally.
+    private transient Map<String, Double> clientBalanceSnapshot;
 
     private final Map<String, Integer> adaptationLevels = new HashMap<>();
     private final Map<String, Long> adaptationTimes = new HashMap<>();
 
     private boolean openedFirstChest = false;
 
-    private static final double ADAPTATION_PER_LEVEL = 0.10;
-    private static final int ADAPTATION_MAX_LEVEL = 10;
-    private static final long ADAPTATION_CD_MS = 3000; // 3秒适应一层
-    private static final double KILL_BONUS_PER_KILL = 0.05; // 5% per kill
     // ===== 十转：负面效果适应 =====
-    private final Map<String, Integer> effectAdaptationLevels = new HashMap<>();
-    private final Map<String, Long> effectAdaptationTimes = new HashMap<>();
     private final Map<String, Integer> effectExposureTicks = new HashMap<>();
     private final java.util.Set<String> disabledDamageTypes = new java.util.HashSet<>();
     private final java.util.Set<String> disabledEffectTypes = new java.util.HashSet<>();
-    private static final int EFFECT_ADAPTATION_MAX_LEVEL = 5;
-    private static final long EFFECT_ADAPTATION_CD_MS = 3000; // 3秒叠加一层
-    private static final int EFFECT_EXPOSURE_THRESHOLD = 100; // 持续5秒(100tick)叠加一层
     // ===== 饰品防收取：已装备的九转戒/轮转物品快照（用于被强制摘取后自动恢复） =====
     private final java.util.Map<String, net.minecraft.nbt.CompoundTag> accessorySnapshot = new java.util.HashMap<>();
 
@@ -77,7 +79,14 @@ public class PlayerData implements IPlayerData {
     private transient int dimensionFixDelay = 0;
 
     @Override public boolean isRingEquipped() { return ringEquipped; }
-    @Override public void setRingEquipped(boolean equipped) { this.ringEquipped = equipped; }
+    @Override public void setRingEquipped(boolean equipped) {
+        this.ringEquipped = equipped;
+        if (!equipped) {
+            invincibleEnd = 0;
+            emergencyShield = 0;
+            shieldEndTick = 0;
+        }
+    }
 
     @Override
     public boolean isActivated(int rotation) {
@@ -88,46 +97,73 @@ public class PlayerData implements IPlayerData {
     @Override
     public void setActivated(int rotation, boolean value) {
         if (rotation >= 1 && rotation <= 10) activated[rotation] = value;
+        if (!value && rotation == 7) invincibleEnd = 0;
+        if (!value && rotation == 9) {
+            emergencyShield = 0;
+            shieldEndTick = 0;
+        }
     }
 
     @Override public int getPowerKillCount() { return powerKillCount; }
-    @Override public void addPowerKill(int count) { this.powerKillCount += count; }
+    @Override public void addPowerKill(int count) { this.powerKillCount = BalanceMath.saturatingAdd(powerKillCount, count); }
     @Override public double getPowerDamageBonus() {
-        double bonus = powerKillCount * ServerConfig.getRot1DamagePerKill();
-        double cap = ServerConfig.getRot1DamageCap();
-        return cap > 0 ? Math.min(bonus, cap) : bonus;
+        return BalanceMath.curve(getBalanceValue(ServerConfig.ROT1_CAP), powerKillCount,
+                getBalanceValue(ServerConfig.ROT1_N90));
     }
 
     @Override public int getHealthKillCount() { return healthKillCount; }
-    @Override public void addHealthKill(int count) { this.healthKillCount += count; }
+    @Override public void addHealthKill(int count) { this.healthKillCount = BalanceMath.saturatingAdd(healthKillCount, count); }
     @Override public double getHealthBonus() {
-        double bonus = healthKillCount * ServerConfig.getRot5HealthPerKill();
-        double cap = ServerConfig.getRot5HealthCap();
-        return cap > 0 ? Math.min(bonus, cap) : bonus;
+        return BalanceMath.curve(getBalanceValue(ServerConfig.ROT5_CAP), healthKillCount,
+                getBalanceValue(ServerConfig.ROT5_N90));
+    }
+
+    @Override public long getOnlineTicks() { return onlineTicks; }
+    @Override public void tickOnlineTime() { onlineTicks = BalanceMath.saturatingAdd(onlineTicks, 1); }
+    @Override public long getCombatEndTick() { return combatEndTick; }
+    @Override public void setCombatEndTick(long tick) { combatEndTick = Math.max(0, tick); }
+    @Override public long getLastCombatTick() { return lastCombatTick; }
+    @Override public void markCombat() {
+        lastCombatTick = onlineTicks;
+        combatEndTick = BalanceMath.saturatingAdd(onlineTicks, ServerConfig.getCombatTicks());
+    }
+    @Override public double getBalanceValue(String key) {
+        if (clientBalanceSnapshot != null && clientBalanceSnapshot.containsKey(key)) return clientBalanceSnapshot.get(key);
+        return ServerConfig.getBalanceValue(key);
     }
 
     @Override public long getUndyingCooldownEnd() { return undyingCooldownEnd; }
-    @Override public void setUndyingCooldownEnd(long time) { this.undyingCooldownEnd = time; }
+    @Override public void setUndyingCooldownEnd(long time) { this.undyingCooldownEnd = Math.max(0, time); }
     @Override public long getInvincibleEnd() { return invincibleEnd; }
-    @Override public void setInvincibleEnd(long time) { this.invincibleEnd = time; }
+    @Override public void setInvincibleEnd(long time) { this.invincibleEnd = Math.max(0, time); }
     @Override public boolean isInCooldown(long now) { return now < undyingCooldownEnd; }
     @Override public boolean isInvincible(long now) { return now < invincibleEnd; }
+    @Override public float getEmergencyShield() { return emergencyShield; }
+    @Override public void setEmergencyShield(float amount) { emergencyShield = Float.isFinite(amount) ? Math.max(0, amount) : 0; }
+    @Override public long getShieldEndTick() { return shieldEndTick; }
+    @Override public void setShieldEndTick(long tick) { shieldEndTick = Math.max(0, tick); }
+    @Override public long getShieldCooldownEnd() { return shieldCooldownEnd; }
+    @Override public void setShieldCooldownEnd(long tick) { shieldCooldownEnd = Math.max(0, tick); }
 
     @Override public int getAdaptationLevel(String damageType) { return adaptationLevels.getOrDefault(damageType, 0); }
 
     @Override
     public void addAdaptation(String damageType, long now) {
+        if (isDamageAdaptationDisabled(damageType)) return;
+        now = Math.max(0, now);
         Long lastTime = adaptationTimes.get(damageType);
-        long cdMs = (long) ServerConfig.getRot10StackCooldownSeconds() * 1000L;
-        if (lastTime != null && now - lastTime < cdMs) return;
+        long interval = ServerConfig.getRot10StackCooldownTicks();
+        if (lastTime != null && (now < lastTime || now - lastTime < interval)) return;
         int current = adaptationLevels.getOrDefault(damageType, 0);
-        if (current < ServerConfig.getRot10MaxStacks()) adaptationLevels.put(damageType, current + 1);
+        adaptationLevels.put(damageType, BalanceMath.saturatingAdd(current, 1));
         adaptationTimes.put(damageType, now);
+        if (getCompletedAdaptationCount() >= 3) flightUnlocked = true;
     }
 
     @Override
     public double getAdaptationReduction(String damageType) {
-        return Math.min(1.0, getAdaptationLevel(damageType) * ServerConfig.getRot10ReductionPerStack());
+        return BalanceMath.curve(getBalanceValue(ServerConfig.ROT10_DAMAGE_CAP), getAdaptationLevel(damageType),
+                getBalanceValue(ServerConfig.ROT10_HITS90));
     }
 
     @Override public Map<String, Integer> getAllAdaptationLevels() { return adaptationLevels; }
@@ -135,52 +171,36 @@ public class PlayerData implements IPlayerData {
     @Override public int getCompletedAdaptationCount() {
         int count = 0;
         for (int level : adaptationLevels.values()) {
-            if (level >= 10) count++;
+            if (level >= getBalanceValue(ServerConfig.ROT10_MATURITY_COUNT)) count++;
         }
         return count;
     }
     @Override public boolean hasFullAdaptation(String damageType) {
-        return getAdaptationLevel(damageType) >= ServerConfig.getRot10MaxStacks();
+        return getAdaptationLevel(damageType) >= getBalanceValue(ServerConfig.ROT10_MATURITY_COUNT);
     }
     @Override public boolean hasFlightAdaptation() {
-        return getCompletedAdaptationCount() >= 3;
+        if (getCompletedAdaptationCount() >= 3) flightUnlocked = true;
+        return flightUnlocked;
     }
+    @Override public void setFlightUnlocked(boolean value) { flightUnlocked = value; }
     @Override public boolean isDamageAdaptationDisabled(String damageType) { return disabledDamageTypes.contains(damageType); }
     @Override public void setDamageAdaptationDisabled(String damageType, boolean disabled) {
         if (disabled) disabledDamageTypes.add(damageType); else disabledDamageTypes.remove(damageType);
     }
     @Override public java.util.Set<String> getDisabledDamageTypes() { return new java.util.HashSet<>(disabledDamageTypes); }
     // ===== 十转：负面效果适应 =====
-    @Override public int getEffectAdaptationLevel(String effectId) {
-        return effectAdaptationLevels.getOrDefault(effectId, 0);
-    }
-    @Override
-    public void addEffectAdaptation(String effectId, long now) {
-        Long lastTime = effectAdaptationTimes.get(effectId);
-        if (lastTime != null && now - lastTime < EFFECT_ADAPTATION_CD_MS) return;
-        int current = effectAdaptationLevels.getOrDefault(effectId, 0);
-        if (current < EFFECT_ADAPTATION_MAX_LEVEL) {
-            effectAdaptationLevels.put(effectId, current + 1);
-        }
-        effectAdaptationTimes.put(effectId, now);
-    }
     @Override
     public double getEffectAdaptationReduction(String effectId) {
-        return Math.min(1.0, getEffectAdaptationLevel(effectId) * ADAPTATION_PER_LEVEL);
+        return BalanceMath.curve(getBalanceValue(ServerConfig.ROT10_EFFECT_CAP), getEffectExposureTicks(effectId) / 20.0,
+                getBalanceValue(ServerConfig.ROT10_EFFECT_SECONDS90));
     }
-    @Override public Map<String, Integer> getAllEffectAdaptationLevels() { return effectAdaptationLevels; }
-    @Override public Map<String, Long> getAllEffectAdaptationTimes() { return effectAdaptationTimes; }
-    @Override public boolean hasFullEffectAdaptation(String effectId) {
-        return getEffectAdaptationLevel(effectId) >= EFFECT_ADAPTATION_MAX_LEVEL;
-    }
+    @Override public Map<String, Integer> getAllEffectExposureTicks() { return effectExposureTicks; }
     @Override public int getEffectExposureTicks(String effectId) {
         return effectExposureTicks.getOrDefault(effectId, 0);
     }
     @Override public void addEffectExposureTicks(String effectId, int ticks) {
-        effectExposureTicks.put(effectId, effectExposureTicks.getOrDefault(effectId, 0) + ticks);
-    }
-    @Override public void resetEffectExposureTicks(String effectId) {
-        effectExposureTicks.put(effectId, 0);
+        if (ticks <= 0 || isEffectAdaptationDisabled(effectId)) return;
+        effectExposureTicks.put(effectId, BalanceMath.saturatingAdd(effectExposureTicks.getOrDefault(effectId, 0), ticks));
     }
     @Override public boolean isEffectAdaptationDisabled(String effectId) { return disabledEffectTypes.contains(effectId); }
     @Override public void setEffectAdaptationDisabled(String effectId, boolean disabled) {
@@ -283,13 +303,25 @@ public class PlayerData implements IPlayerData {
     @Override
     public void syncToClient(Player player) {
         if (player instanceof ServerPlayer sp) {
-            NetworkHandler.INSTANCE.send(PacketDistributor.PLAYER.with(() -> sp), new SyncPlayerDataPacket(saveNBT()));
+            CompoundTag packetData = saveNBT();
+            CompoundTag balance = new CompoundTag();
+            ServerConfig.snapshot().forEach(balance::putDouble);
+            packetData.put("balanceSnapshot", balance);
+            NetworkHandler.INSTANCE.send(PacketDistributor.PLAYER.with(() -> sp), new SyncPlayerDataPacket(packetData));
         }
     }
 
     @Override
     public CompoundTag saveNBT() {
         CompoundTag tag = new CompoundTag();
+        tag.putInt("dataVersion", DATA_VERSION);
+        tag.putLong("onlineTicks", onlineTicks);
+        tag.putLong("combatEndTick", combatEndTick);
+        tag.putLong("lastCombatTick", lastCombatTick);
+        tag.putFloat("emergencyShield", emergencyShield);
+        tag.putLong("shieldEndTick", shieldEndTick);
+        tag.putLong("shieldCooldownEnd", shieldCooldownEnd);
+        tag.putBoolean("flightUnlocked", hasFlightAdaptation());
         tag.putBoolean("ringEquipped", ringEquipped);
         CompoundTag actTag = new CompoundTag();
         for (int i = 1; i <= 10; i++) actTag.putBoolean("rot_" + i, activated[i]);
@@ -304,20 +336,14 @@ public class PlayerData implements IPlayerData {
         for (Map.Entry<String, Integer> e : adaptationLevels.entrySet()) {
             CompoundEntry entry = new CompoundEntry();
             entry.level = e.getValue();
-            entry.time = adaptationTimes.getOrDefault(e.getKey(), 0L);
+            entry.time = adaptationTimes.getOrDefault(e.getKey(), -1L);
             adaptTag.put(e.getKey(), entry.save());
         }
         tag.put("adaptation", adaptTag);
         // 十转：负面效果适应
-        CompoundTag effectAdaptTag = new CompoundTag();
-        for (Map.Entry<String, Integer> e : effectAdaptationLevels.entrySet()) {
-            EffectEntry entry = new EffectEntry();
-            entry.level = e.getValue();
-            entry.time = effectAdaptationTimes.getOrDefault(e.getKey(), 0L);
-            entry.exposure = effectExposureTicks.getOrDefault(e.getKey(), 0);
-            effectAdaptTag.put(e.getKey(), entry.save());
-        }
-        tag.put("effectAdaptation", effectAdaptTag);
+        CompoundTag exposureTag = new CompoundTag();
+        effectExposureTicks.forEach(exposureTag::putInt);
+        tag.put("effectExposureTicks", exposureTag);
 
         // 适应禁用列表
         net.minecraft.nbt.ListTag disabledDmg = new net.minecraft.nbt.ListTag();
@@ -368,15 +394,31 @@ public class PlayerData implements IPlayerData {
 
     @Override
     public void loadNBT(CompoundTag tag) {
+        clientBalanceSnapshot = null;
+        boolean legacy = tag.getInt("dataVersion") < DATA_VERSION;
+        onlineTicks = legacy ? 0 : Math.max(0, tag.getLong("onlineTicks"));
+        combatEndTick = legacy ? 0 : Math.max(0, tag.getLong("combatEndTick"));
+        lastCombatTick = legacy || !tag.contains("lastCombatTick") ? -ServerConfig.getRot4RestTicks()
+                : Math.max(-ServerConfig.getRot4RestTicks(), Math.min(onlineTicks, tag.getLong("lastCombatTick")));
+        setEmergencyShield(legacy ? 0 : tag.getFloat("emergencyShield"));
+        shieldEndTick = legacy ? 0 : Math.max(0, tag.getLong("shieldEndTick"));
+        shieldCooldownEnd = legacy ? 0 : Math.max(0, tag.getLong("shieldCooldownEnd"));
+        flightUnlocked = !legacy && tag.getBoolean("flightUnlocked");
         ringEquipped = tag.getBoolean("ringEquipped");
-        if (tag.contains("activated")) {
-            CompoundTag actTag = tag.getCompound("activated");
-            for (int i = 1; i <= 10; i++) activated[i] = actTag.getBoolean("rot_" + i);
+        CompoundTag actTag = tag.getCompound("activated");
+        for (int i = 1; i <= 10; i++) activated[i] = actTag.getBoolean("rot_" + i);
+        powerKillCount = Math.max(0, tag.getInt("powerKills"));
+        healthKillCount = Math.max(0, tag.getInt("healthKills"));
+        if (legacy) {
+            long nowMillis = System.currentTimeMillis();
+            undyingCooldownEnd = BalanceMath.migrateCooldown(tag.getLong("undyingCd"), nowMillis, ServerConfig.getLegacyRescueCooldownMillis(),
+                    ServerConfig.getRot7CooldownTicks());
+            invincibleEnd = BalanceMath.migrateCooldown(tag.getLong("invincibleEnd"), nowMillis, 1500,
+                    Math.min(30, ServerConfig.getRot7InvincibleTicks()));
+        } else {
+            undyingCooldownEnd = Math.max(0, tag.getLong("undyingCd"));
+            invincibleEnd = Math.max(0, tag.getLong("invincibleEnd"));
         }
-        powerKillCount = tag.getInt("powerKills");
-        healthKillCount = tag.getInt("healthKills");
-        undyingCooldownEnd = tag.getLong("undyingCd");
-        invincibleEnd = tag.getLong("invincibleEnd");
         openedFirstChest = tag.getBoolean("firstChest");
 
         adaptationLevels.clear();
@@ -385,22 +427,21 @@ public class PlayerData implements IPlayerData {
             CompoundTag adaptTag = tag.getCompound("adaptation");
             for (String key : adaptTag.getAllKeys()) {
                 CompoundEntry entry = CompoundEntry.load(adaptTag.getCompound(key));
-                adaptationLevels.put(key, entry.level);
-                adaptationTimes.put(key, entry.time);
+                adaptationLevels.put(key, Math.max(0, entry.level));
+                if (!legacy && entry.time >= 0) adaptationTimes.put(key, Math.min(onlineTicks, entry.time));
             }
         }
         // 十转：负面效果适应
-        effectAdaptationLevels.clear();
-        effectAdaptationTimes.clear();
         effectExposureTicks.clear();
-        if (tag.contains("effectAdaptation")) {
+        if (legacy && tag.contains("effectAdaptation")) {
             CompoundTag effectAdaptTag = tag.getCompound("effectAdaptation");
             for (String key : effectAdaptTag.getAllKeys()) {
                 EffectEntry entry = EffectEntry.load(effectAdaptTag.getCompound(key));
-                effectAdaptationLevels.put(key, entry.level);
-                effectAdaptationTimes.put(key, entry.time);
-                effectExposureTicks.put(key, entry.exposure);
+                effectExposureTicks.put(key, BalanceMath.migrateEffectExposure(entry.level, entry.exposure));
             }
+        } else if (!legacy) {
+            CompoundTag exposureTag = tag.getCompound("effectExposureTicks");
+            for (String key : exposureTag.getAllKeys()) effectExposureTicks.put(key, Math.max(0, exposureTag.getInt(key)));
         }
         // 适应禁用列表（必须先清空，否则同步时旧数据残留）
         disabledDamageTypes.clear();
@@ -442,6 +483,10 @@ public class PlayerData implements IPlayerData {
         natallyGotRot10 = tag.getBoolean("gotRot10");
         announcedFlightAdaptation = tag.getBoolean("announcedFlight");
         flightGrantedByMod = tag.getBoolean("flightGrantedByMod");
+        if (legacy) {
+            long legacyMatureTypes = adaptationLevels.values().stream().filter(count -> count >= 10).count();
+            flightUnlocked = announcedFlightAdaptation || flightGrantedByMod || legacyMatureTypes >= 3;
+        }
 
         grantedAdvancements.clear();
         if (tag.contains("advancements")) {
@@ -459,34 +504,42 @@ public class PlayerData implements IPlayerData {
         }
     }
 
+    @Override
+    public void loadClientNBT(CompoundTag tag) {
+        loadNBT(tag);
+        if (tag.contains("balanceSnapshot")) {
+            CompoundTag balance = tag.getCompound("balanceSnapshot");
+            clientBalanceSnapshot = new HashMap<>();
+            for (String key : ServerConfig.snapshot().keySet()) {
+                if (balance.contains(key)) {
+                    double value = balance.getDouble(key);
+                    if (Double.isFinite(value) && value >= 0) clientBalanceSnapshot.put(key, value);
+                }
+            }
+        }
+    }
+
     private static class CompoundEntry {
         int level;
         long time;
         CompoundTag save() {
             CompoundTag t = new CompoundTag();
             t.putInt("lvl", level);
-            t.putLong("time", time);
+            if (time >= 0) t.putLong("time", time);
             return t;
         }
         static CompoundEntry load(CompoundTag t) {
             CompoundEntry e = new CompoundEntry();
             e.level = t.getInt("lvl");
-            e.time = t.getLong("time");
+            e.time = t.contains("time") ? t.getLong("time") : -1;
             return e;
         }
     }
-    // 负面效果适应条目：层数 + 上次叠加时间 + 当前暴露tick
+    // Legacy-only effect entry; new saves store permanent exposure directly.
     private static class EffectEntry {
         int level;
         long time;
         int exposure;
-        CompoundTag save() {
-            CompoundTag t = new CompoundTag();
-            t.putInt("lvl", level);
-            t.putLong("time", time);
-            t.putInt("exp", exposure);
-            return t;
-        }
         static EffectEntry load(CompoundTag t) {
             EffectEntry e = new EffectEntry();
             e.level = t.getInt("lvl");

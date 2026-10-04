@@ -2,7 +2,7 @@
   "display": {
     "icon": {"item": "nine_turn_ring:nine_turn_ring"},
     "title": {"text": "登神之路"},
-    "description": {"text": "完成五种伤害类型的适应"},
+    "description": {"text": "使五种伤害类型达到适应成熟"},
     "frame": "challenge",
     "show_toast": true,
     "announce_to_chat": true,
